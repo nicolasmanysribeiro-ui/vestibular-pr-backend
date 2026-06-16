@@ -1,0 +1,361 @@
+// VestibularPR — schema.prisma
+// Prisma ORM + PostgreSQL + pgvector
+// Gerado para o projeto acadêmico VestibularPR (Lei 9.609/1998)
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [pgvector(map: "vector"), uuid_ossp(map: "uuid-ossp")]
+}
+
+// ─────────────────────────────────────────────
+// USUÁRIOS
+// ─────────────────────────────────────────────
+
+model User {
+  id                    String    @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  name                  String    @db.VarChar(255)
+  email                 String    @unique @db.VarChar(255)
+  passwordHash          String    @map("password_hash") @db.VarChar(255)
+  avatarUrl             String?   @map("avatar_url") @db.Text
+
+  // Universidade selecionada
+  selectedUniversityId  String?   @map("selected_university_id") @db.Uuid
+  selectedUniversity    University? @relation(fields: [selectedUniversityId], references: [id])
+
+  // Gamificação
+  xp                    Int       @default(0)
+  level                 Int       @default(1)
+  streakDays            Int       @default(0)    @map("streak_days")
+  lastStudyDate         DateTime? @map("last_study_date") @db.Date
+
+  // Flags de onboarding
+  hasCompletedLeveling  Boolean   @default(false) @map("has_completed_leveling")
+
+  // Timestamps
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt      @map("updated_at")
+
+  // Relações
+  levelingAssessment    LevelingAssessment?
+  attempts              Attempt[]
+  simulations           Simulation[]
+  xpEvents              XpEvent[]
+  userAchievements      UserAchievement[]
+  goals                 Goal[]
+  statistics            Statistic[]
+
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────
+// UNIVERSIDADES
+// ─────────────────────────────────────────────
+
+model University {
+  id          String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  name        String   @db.VarChar(255)
+  acronym     String   @unique @db.VarChar(20)
+  state       String   @default("PR") @db.VarChar(2)
+  logoUrl     String?  @map("logo_url") @db.Text
+  description String?  @db.Text
+  website     String?  @db.VarChar(255)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  // Relações
+  users         User[]
+  realQuestions RealQuestion[]
+  aiQuestions   AiQuestion[]
+  simulations   Simulation[]
+
+  @@map("universities")
+}
+
+// ─────────────────────────────────────────────
+// DISCIPLINAS
+// ─────────────────────────────────────────────
+
+model Discipline {
+  id        String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  name      String   @unique @db.VarChar(255)
+  category  String?  @db.VarChar(100)   // ex: "Exatas", "Humanas", "Linguagens"
+  icon      String?  @db.VarChar(50)    // emoji ou nome do ícone
+  color     String?  @db.VarChar(7)     // hex color para UI
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Relações
+  realQuestions RealQuestion[]
+  aiQuestions   AiQuestion[]
+
+  @@map("disciplines")
+}
+
+// ─────────────────────────────────────────────
+// QUESTÕES REAIS (banco de provas anteriores)
+// ─────────────────────────────────────────────
+
+model RealQuestion {
+  id             String     @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  universityId   String     @map("university_id") @db.Uuid
+  university     University @relation(fields: [universityId], references: [id])
+  disciplineId   String     @map("discipline_id") @db.Uuid
+  discipline     Discipline @relation(fields: [disciplineId], references: [id])
+
+  year           Int                                    // Ano da prova
+  source         String?    @db.VarChar(255)            // Ex: "Vestibular UFPR 2023"
+  difficulty     Difficulty
+  questionType   QuestionType @map("question_type")
+
+  statement      String     @db.Text
+  alternatives   Json?                                  // [{id:"A", text:"..."}, ...]
+  correctAnswer  String     @map("correct_answer") @db.VarChar(5)
+  explanation    String?    @db.Text
+
+  tags           String[]   @default([])               // ["trigonometria", "seno", ...]
+
+  // pgvector: embedding para RAG
+  embedding      Unsupported("vector(1536)")?
+
+  createdAt      DateTime   @default(now()) @map("created_at")
+
+  // Relações
+  aiQuestions    AiQuestion[]   @relation("InspiredBy")
+
+  @@map("real_questions")
+}
+
+// ─────────────────────────────────────────────
+// QUESTÕES GERADAS POR IA
+// ─────────────────────────────────────────────
+
+model AiQuestion {
+  id                String     @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  baseUniversityId  String     @map("base_university_id") @db.Uuid
+  baseUniversity    University @relation(fields: [baseUniversityId], references: [id])
+  disciplineId      String     @map("discipline_id") @db.Uuid
+  discipline        Discipline @relation(fields: [disciplineId], references: [id])
+
+  difficulty        Difficulty
+  questionType      QuestionType @map("question_type")
+
+  statement         String     @db.Text
+  alternatives      Json?
+  correctAnswer     String     @map("correct_answer") @db.VarChar(5)
+  explanation       String?    @db.Text
+
+  // Rastreabilidade RAG
+  inspiredBy        String?    @map("inspired_by") @db.Uuid
+  inspiredByQuestion RealQuestion? @relation("InspiredBy", fields: [inspiredBy], references: [id])
+
+  generationPrompt  String?    @map("generation_prompt") @db.Text
+  generatedAt       DateTime   @default(now()) @map("generated_at")
+
+  @@map("ai_questions")
+}
+
+// ─────────────────────────────────────────────
+// TENTATIVAS (respostas dos alunos)
+// ─────────────────────────────────────────────
+
+model Attempt {
+  id             String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  user           User     @relation(fields: [userId], references: [id])
+
+  questionId     String   @map("question_id") @db.Uuid
+  questionSource String   @map("question_source") @db.VarChar(10)  // "real" | "ai"
+
+  answer         String   @db.VarChar(5)
+  isCorrect      Boolean  @map("is_correct")
+  timeSpent      Int?     @map("time_spent")  // segundos
+
+  simulationId   String?  @map("simulation_id") @db.Uuid
+  simulation     Simulation? @relation(fields: [simulationId], references: [id])
+
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([userId, questionSource])
+  @@index([userId, createdAt])
+  @@map("attempts")
+}
+
+// ─────────────────────────────────────────────
+// SIMULADOS
+// ─────────────────────────────────────────────
+
+model Simulation {
+  id             String      @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  userId         String      @map("user_id") @db.Uuid
+  user           User        @relation(fields: [userId], references: [id])
+  universityId   String?     @map("university_id") @db.Uuid
+  university     University? @relation(fields: [universityId], references: [id])
+
+  title          String?     @db.VarChar(255)
+  totalQuestions Int         @map("total_questions")
+  correctAnswers Int         @default(0) @map("correct_answers")
+  score          Decimal     @default(0) @db.Decimal(5, 2)  // 0.00 a 10.00
+  timeSpent      Int?        @map("time_spent")             // segundos
+
+  status         SimulationStatus @default(IN_PROGRESS)
+
+  questionIds    Json        @map("question_ids")   // [{id, source}, ...]
+  answers        Json?                              // {questionId: answer, ...}
+
+  startedAt      DateTime    @default(now()) @map("started_at")
+  completedAt    DateTime?   @map("completed_at")
+
+  // Relações
+  attempts       Attempt[]
+
+  @@index([userId, status])
+  @@map("simulations")
+}
+
+// ─────────────────────────────────────────────
+// NIVELAMENTO INICIAL
+// ─────────────────────────────────────────────
+
+model LevelingAssessment {
+  id           String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  userId       String   @unique @map("user_id") @db.Uuid
+  user         User     @relation(fields: [userId], references: [id])
+
+  overallScore Decimal  @map("overall_score") @db.Decimal(4, 2)
+  level        String   @db.VarChar(30)  // "Iniciante" | "Intermediário" | "Avançado"
+  skillsRadar  Json     @map("skills_radar")  // {matematica: 7.5, portugues: 6.0, ...}
+  report       String?  @db.Text
+
+  completedAt  DateTime @default(now()) @map("completed_at")
+
+  @@map("leveling_assessments")
+}
+
+// ─────────────────────────────────────────────
+// ESTATÍSTICAS
+// ─────────────────────────────────────────────
+
+model Statistic {
+  id              String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  userId          String   @map("user_id") @db.Uuid
+  user            User     @relation(fields: [userId], references: [id])
+
+  date            DateTime @db.Date
+  questionsAnswered Int    @default(0) @map("questions_answered")
+  questionsCorrect  Int    @default(0) @map("questions_correct")
+  studyTimeSeconds  Int    @default(0) @map("study_time_seconds")
+
+  // Por disciplina — snapshot JSON diário
+  byDiscipline    Json?    @map("by_discipline")  // {disciplineId: {answered, correct}, ...}
+
+  @@unique([userId, date])
+  @@index([userId, date])
+  @@map("statistics")
+}
+
+// ─────────────────────────────────────────────
+// GAMIFICAÇÃO — XP
+// ─────────────────────────────────────────────
+
+model XpEvent {
+  id          String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  userId      String   @map("user_id") @db.Uuid
+  user        User     @relation(fields: [userId], references: [id])
+
+  eventType   String   @map("event_type") @db.VarChar(50)
+  xpAmount    Int      @map("xp_amount")
+  description String?  @db.VarChar(255)
+
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([userId, createdAt])
+  @@map("xp_events")
+}
+
+// ─────────────────────────────────────────────
+// GAMIFICAÇÃO — CONQUISTAS
+// ─────────────────────────────────────────────
+
+model Achievement {
+  id             String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  code           String   @unique @db.VarChar(50)
+  title          String   @db.VarChar(100)
+  description    String?  @db.Text
+  icon           String?  @db.VarChar(50)
+  xpReward       Int      @default(0) @map("xp_reward")
+  conditionType  String   @map("condition_type") @db.VarChar(50)
+  conditionValue Int      @map("condition_value")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  userAchievements UserAchievement[]
+
+  @@map("achievements")
+}
+
+model UserAchievement {
+  id            String      @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  userId        String      @map("user_id") @db.Uuid
+  user          User        @relation(fields: [userId], references: [id])
+  achievementId String      @map("achievement_id") @db.Uuid
+  achievement   Achievement @relation(fields: [achievementId], references: [id])
+  unlockedAt    DateTime    @default(now()) @map("unlocked_at")
+
+  @@unique([userId, achievementId])
+  @@map("user_achievements")
+}
+
+// ─────────────────────────────────────────────
+// GAMIFICAÇÃO — METAS
+// ─────────────────────────────────────────────
+
+model Goal {
+  id            String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  userId        String   @map("user_id") @db.Uuid
+  user          User     @relation(fields: [userId], references: [id])
+
+  goalType      String   @map("goal_type") @db.VarChar(50)
+  // "daily_questions" | "daily_study_time" | "weekly_simulations" | "weekly_correct"
+
+  targetValue   Int      @map("target_value")
+  currentValue  Int      @default(0) @map("current_value")
+  period        String   @db.VarChar(20)   // "daily" | "weekly" | "monthly"
+  isCompleted   Boolean  @default(false)   @map("is_completed")
+  deadline      DateTime @db.Date
+
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([userId, isCompleted])
+  @@map("goals")
+}
+
+// ─────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────
+
+enum Difficulty {
+  FACIL    @map("facil")
+  MEDIO    @map("medio")
+  DIFICIL  @map("dificil")
+
+  @@map("difficulty")
+}
+
+enum QuestionType {
+  MULTIPLA_ESCOLHA  @map("multipla_escolha")
+  VERDADEIRO_FALSO  @map("verdadeiro_falso")
+  DISSERTATIVA      @map("dissertativa")
+
+  @@map("question_type")
+}
+
+enum SimulationStatus {
+  IN_PROGRESS  @map("in_progress")
+  COMPLETED    @map("completed")
+  ABANDONED    @map("abandoned")
+
+  @@map("simulation_status")
+}
